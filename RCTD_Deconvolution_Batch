@@ -1,0 +1,147 @@
+############################################################
+# Script name: OP5_RCTD_Deconvolution_Batch.R
+# Description:
+#   Run RCTD deconvolution for multiple OP5 spatial samples
+#   using a single-cell reference
+############################################################
+
+rm(list = ls())
+options(stringsAsFactors = FALSE)
+
+setwd("E:/path/to/OP/OP5")
+
+############################
+# 1. Load packages
+############################
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(spacexr)
+  library(Matrix)
+  library(patchwork)
+  library(ggplot2)
+})
+
+############################
+# 2. Build RCTD reference
+############################
+ref <- UpdateSeuratObject(sc_all_0918)
+Idents(ref) <- "celltype_fine"
+
+ref_counts <- ref[["RNA"]]$counts
+ref_cluster <- as.factor(ref$celltype_fine)
+names(ref_cluster) <- colnames(ref)
+
+ref_nUMI <- Matrix::colSums(ref_counts)
+names(ref_nUMI) <- colnames(ref)
+
+reference <- Reference(ref_counts, ref_cluster, ref_nUMI)
+
+############################
+# 3. Define RCTD processing function
+############################
+run_rctd_for_sample <- function(spatial_obj, sample_name, reference, max_cores = 8, umi_min_sigma = 30) {
+  spatial_counts <- spatial_obj[["Spatial"]]$counts
+  
+  spatial_coords <- GetTissueCoordinates(spatial_obj)
+  colnames(spatial_coords) <- c("x", "y")
+  spatial_coords <- spatial_coords[, c("x", "y"), drop = FALSE]
+  
+  query <- SpatialRNA(
+    coords = spatial_coords,
+    counts = spatial_counts,
+    nUMI = colSums(spatial_counts)
+  )
+  
+  rctd_obj <- create.RCTD(
+    puck = query,
+    reference = reference,
+    max_cores = max_cores
+  )
+  
+  rctd_obj@config$UMI_min_sigma <- umi_min_sigma
+  
+  rctd_obj <- run.RCTD(
+    RCTD = rctd_obj,
+    doublet_mode = "doublet"
+  )
+  
+  spatial_obj <- AddMetaData(
+    object = spatial_obj,
+    metadata = rctd_obj@results$results_df
+  )
+  
+  weights <- rctd_obj@results$weights
+  norm_weights <- normalize_weights(weights)
+  
+  spatial_obj[["rctd_full"]] <- CreateAssayObject(
+    data = t(as.matrix(norm_weights))
+  )
+  
+  if (length(spatial_obj@assays$rctd_full@key) == 0) {
+    spatial_obj@assays$rctd_full@key <- "rctd_full_"
+  }
+  
+  spatial_obj$orig.ident <- sample_name
+  
+  plot_first <- SpatialDimPlot(
+    spatial_obj,
+    group.by = "first_type",
+    pt.size.factor = 10
+  )
+  
+  plot_second <- SpatialDimPlot(
+    spatial_obj,
+    group.by = "second_type",
+    pt.size.factor = 10
+  )
+  
+  combined_plot <- plot_first + plot_second
+  
+  return(list(
+    seurat_obj = spatial_obj,
+    rctd_obj = rctd_obj,
+    plot = combined_plot
+  ))
+}
+
+############################
+# 4. Run RCTD for all OP5 samples
+############################
+sample_list <- list(
+  OP5_1 = OP5_1,
+  ······
+)
+
+rctd_results <- lapply(names(sample_list), function(sample_name) {
+  message("Running RCTD for: ", sample_name)
+  run_rctd_for_sample(
+    spatial_obj = sample_list[[sample_name]],
+    sample_name = sample_name,
+    reference = reference,
+    max_cores = 8,
+    umi_min_sigma = 30
+  )
+})
+
+names(rctd_results) <- names(sample_list)
+
+############################
+# 5. Extract processed objects
+############################
+OP5_1 <- rctd_results[["OP5_1"]]$seurat_obj
+······
+
+############################
+# 6. Save plots
+############################
+pdf("OP5_RCTD_annotation_plots.pdf", width = 10, height = 12)
+for (sample_name in names(rctd_results)) {
+  print(rctd_results[[sample_name]]$plot)
+}
+dev.off()
+
+############################
+# 7. Save processed Seurat objects
+############################
+save(OP5_1, file = "OP5_1_RCTD.Rdata")
+······
