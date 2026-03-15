@@ -1,0 +1,187 @@
+############################################################
+# Script name: FibMyo_Group_Pseudobulk_DEG_Heatmap_Top10.R
+# Description:
+#   Sample-level pseudobulk DEG analysis across four groups
+#   and heatmap visualization of top markers per group
+############################################################
+
+rm(list = ls())
+options(stringsAsFactors = FALSE)
+
+setwd("E:/machine_path_placeholder/project/fib_myo_deg_heatmap")
+
+############################
+# 1. Load packages
+############################
+library(Seurat)
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(RColorBrewer)
+library(scales)
+library(Matrix)
+library(edgeR)
+library(limma)
+library(tidyr)
+library(tibble)
+
+############################
+# 2. Check metadata
+############################
+stopifnot("group" %in% colnames(Fib_myo@meta.data))
+stopifnot("orig.ident" %in% colnames(Fib_myo@meta.data))
+
+Fib_myo$group <- factor(Fib_myo$group, levels = c("CTRL", "CTD-ILD", "OP", "IPF"))
+
+table(Fib_myo$group)
+table(Fib_myo$orig.ident, Fib_myo$group)
+
+############################
+# 3. Build pseudobulk counts by sample
+############################
+counts_mat <- GetAssayData(Fib_myo, assay = "Spatial", slot = "counts")
+
+meta_df <- Fib_myo@meta.data %>%
+  as.data.frame() %>%
+  dplyr::select(orig.ident, group) %>%
+  rownames_to_column("barcode")
+
+sample_ids <- unique(meta_df$orig.ident)
+
+pb_counts <- sapply(sample_ids, function(sid) {
+  cell_ids <- meta_df$barcode[meta_df$orig.ident == sid]
+  Matrix::rowSums(counts_mat[, cell_ids, drop = FALSE])
+})
+
+pb_counts <- as.matrix(pb_counts)
+colnames(pb_counts) <- sample_ids
+
+pb_meta <- meta_df %>%
+  dplyr::select(orig.ident, group) %>%
+  distinct()
+
+rownames(pb_meta) <- pb_meta$orig.ident
+pb_meta <- pb_meta[colnames(pb_counts), , drop = FALSE]
+
+############################
+# 4. Filter and normalize pseudobulk data
+############################
+dge <- DGEList(counts = pb_counts)
+keep <- filterByExpr(dge, group = pb_meta$group)
+dge <- dge[keep, , keep.lib.sizes = FALSE]
+dge <- calcNormFactors(dge)
+
+design <- model.matrix(~ 0 + group, data = pb_meta)
+colnames(design) <- gsub("^group", "", colnames(design))
+
+v <- voom(dge, design, plot = FALSE)
+fit <- lmFit(v, design)
+
+contrast_matrix <- makeContrasts(
+  CTRL_vs_all = CTRL - (CTD.ILD + OP + IPF) / 3,
+  CTDILD_vs_all = CTD.ILD - (CTRL + OP + IPF) / 3,
+  OP_vs_all = OP - (CTRL + CTD.ILD + IPF) / 3,
+  IPF_vs_all = IPF - (CTRL + CTD.ILD + OP) / 3,
+  levels = design
+)
+
+fit2 <- contrasts.fit(fit, contrast_matrix)
+fit2 <- eBayes(fit2)
+
+############################
+# 5. Extract DEG tables
+############################
+deg_list <- list(
+  CTRL = topTable(fit2, coef = "CTRL_vs_all", number = Inf, sort.by = "P"),
+  CTD_ILD = topTable(fit2, coef = "CTDILD_vs_all", number = Inf, sort.by = "P"),
+  OP = topTable(fit2, coef = "OP_vs_all", number = Inf, sort.by = "P"),
+  IPF = topTable(fit2, coef = "IPF_vs_all", number = Inf, sort.by = "P")
+)
+
+deg_list <- lapply(names(deg_list), function(nm) {
+  df <- deg_list[[nm]]
+  df$gene <- rownames(df)
+  df$cluster <- nm
+  df
+})
+names(deg_list) <- c("CTRL", "CTD_ILD", "OP", "IPF")
+
+deg_all <- bind_rows(deg_list)
+
+write.csv(deg_all, file = "FibMyo_pseudobulk_DEG_all_groups.csv", row.names = FALSE)
+
+############################
+# 6. Select top 10 upregulated genes per group
+############################
+exclude_genes <- grep("^RPL|^RPS|^MT-", deg_all$gene, value = TRUE, ignore.case = TRUE)
+
+deg_top10 <- deg_all %>%
+  group_by(cluster) %>%
+  dplyr::filter(
+    logFC > 0,
+    adj.P.Val < 0.05,
+    !gene %in% exclude_genes
+  ) %>%
+  slice_max(order_by = logFC, n = 10, with_ties = FALSE) %>%
+  ungroup()
+
+write.csv(deg_top10, file = "FibMyo_pseudobulk_top10_genes_per_group.csv", row.names = FALSE)
+
+############################
+# 7. Build average expression matrix for heatmap
+############################
+expr_norm <- cpm(dge, log = TRUE, prior.count = 1)
+
+group_avg_expr <- sapply(levels(pb_meta$group), function(g) {
+  group_samples <- rownames(pb_meta)[pb_meta$group == g]
+  if (length(group_samples) == 1) {
+    expr_norm[, group_samples]
+  } else {
+    rowMeans(expr_norm[, group_samples, drop = FALSE])
+  }
+})
+
+group_avg_expr <- as.matrix(group_avg_expr)
+group_avg_expr <- group_avg_expr[unique(deg_top10$gene), , drop = FALSE]
+
+heatmap_seurat <- CreateSeuratObject(counts = group_avg_expr)
+DefaultAssay(heatmap_seurat) <- "RNA"
+heatmap_seurat <- ScaleData(heatmap_seurat, features = rownames(heatmap_seurat), verbose = FALSE)
+
+############################
+# 8. Define group colors
+############################
+group_colors <- c(
+  "CTRL" = "#FFC0CB",
+  "CTD-ILD" = "#8DCEE2",
+  "OP" = "#FFA500",
+  "IPF" = "#90EE90"
+)
+
+############################
+# 9. Plot heatmap
+############################
+pdf("FibMyo_pseudobulk_top10_heatmap.pdf", width = 5, height = 7)
+
+p_heatmap <- DoHeatmap(
+  object = heatmap_seurat,
+  features = unique(deg_top10$gene),
+  size = 3,
+  angle = 90,
+  group.bar.height = 0.01,
+  group.colors = group_colors,
+  disp.min = -2,
+  disp.max = 2,
+  draw.lines = FALSE
+) +
+  scale_fill_gradientn(
+    colours = c("white", "yellow", "red"),
+    limits = c(-2, 2),
+    oob = squish
+  ) +
+  theme(
+    text = element_text(size = 8, color = "black")
+  )
+
+print(p_heatmap)
+dev.off()
