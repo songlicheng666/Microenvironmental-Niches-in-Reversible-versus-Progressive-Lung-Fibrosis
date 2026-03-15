@@ -1,0 +1,333 @@
+############################################################
+# Script name: Fib_GCScore_SpatialVisualization_BySample.R
+# Description:
+#   Spatial visualization of GC score and GC-sensitive regions
+#   across Fib samples
+############################################################
+
+rm(list = ls())
+options(stringsAsFactors = FALSE)
+
+setwd("E:/path/to/Fib_GCscore_plots")
+
+############################
+# 1. Load packages
+############################
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(ggplot2)
+  library(patchwork)
+  library(dplyr)
+  library(MASS)
+})
+
+############################
+# 2. Basic checks
+############################
+stopifnot("GC_score" %in% colnames(Fib@meta.data))
+stopifnot("GC_class" %in% colnames(Fib@meta.data))
+stopifnot("orig.ident" %in% colnames(Fib@meta.data))
+
+Fib$GC_class <- as.character(Fib$GC_class)
+all_samples <- unique(Fib$orig.ident)
+
+############################
+# 3. Plot GC score for all samples
+############################
+pdf("Fib_GC_score_all_samples.pdf", height = 15, width = 30)
+
+p_all <- SpatialFeaturePlot(
+  Fib,
+  features = "GC_score",
+  alpha = c(0.1, 1),
+  image.scale = "hires",
+  ncol = 8,
+  pt.size.factor = 4,
+  min.cutoff = 0,
+  max.cutoff = 1
+) &
+  theme_bw() &
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.title = element_blank()
+  )
+
+print(p_all)
+dev.off()
+
+############################
+# 4. Plot GC score for each sample
+############################
+plot_gc_score_by_sample <- function(obj, sample_name) {
+  sample_obj <- subset(obj, subset = orig.ident == sample_name)
+  
+  p <- SpatialFeaturePlot(
+    sample_obj,
+    features = "GC_score",
+    alpha = c(0.1, 1),
+    image.scale = "hires",
+    pt.size.factor = 4,
+    min.cutoff = 0,
+    max.cutoff = 1
+  ) +
+    ggtitle(sample_name) +
+    theme(
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
+    )
+  
+  ggsave(
+    filename = paste0("spatial_gc_score_", sample_name, ".pdf"),
+    plot = p,
+    width = 8,
+    height = 8,
+    dpi = 300
+  )
+}
+
+for (sample_name in all_samples) {
+  plot_gc_score_by_sample(Fib, sample_name)
+}
+
+############################
+# 5. Plot GC-sensitive spots only
+############################
+plot_gc_sensitive_by_sample <- function(obj, sample_name) {
+  sample_obj <- subset(
+    obj,
+    subset = orig.ident == sample_name & GC_class == "GC_sensitive"
+  )
+  
+  if (ncol(sample_obj) == 0) {
+    message("Skipping sample with no GC_sensitive spots: ", sample_name)
+    return(NULL)
+  }
+  
+  p <- SpatialDimPlot(
+    sample_obj,
+    image.scale = "hires",
+    pt.size.factor = 4
+  ) +
+    scale_color_manual(values = "black") +
+    theme(legend.position = "none") +
+    ggtitle(paste0(sample_name, " - GC_sensitive"))
+  
+  ggsave(
+    filename = paste0("spatial_gc_sensitive_", sample_name, ".pdf"),
+    plot = p,
+    width = 8,
+    height = 8
+  )
+}
+
+for (sample_name in all_samples) {
+  plot_gc_sensitive_by_sample(Fib, sample_name)
+}
+
+############################
+# 6. Plot GC score with GC-sensitive overlay
+############################
+plot_gc_score_with_sensitive_overlay <- function(obj, sample_name) {
+  sample_obj <- subset(obj, subset = orig.ident == sample_name)
+  sensitive_obj <- subset(sample_obj, subset = GC_class == "GC_sensitive")
+  
+  spatial_coords <- GetTissueCoordinates(sample_obj)
+  
+  plot_data <- data.frame(
+    x = spatial_coords$x,
+    y = spatial_coords$y,
+    GC_score = sample_obj$GC_score,
+    is_sensitive = colnames(sample_obj) %in% colnames(sensitive_obj)
+  )
+  
+  p <- ggplot(plot_data, aes(x = x, y = y)) +
+    geom_point(aes(color = GC_score), size = 4) +
+    scale_color_gradientn(colours = c("blue", "yellow", "red")) +
+    geom_point(
+      data = subset(plot_data, is_sensitive),
+      shape = 17,
+      size = 2,
+      color = "black",
+      stroke = 1.5
+    ) +
+    theme_void() +
+    theme(legend.position = "right") +
+    ggtitle(paste0(sample_name, " - GC score with sensitive overlay"))
+  
+  ggsave(
+    filename = paste0("spatial_gc_score_overlay_", sample_name, ".pdf"),
+    plot = p,
+    width = 10,
+    height = 10,
+    bg = "white"
+  )
+}
+
+for (sample_name in all_samples) {
+  plot_gc_score_with_sensitive_overlay(Fib, sample_name)
+}
+
+############################
+# 7. Compute global density range
+############################
+get_sensitive_density_range <- function(obj, sample_name) {
+  sample_obj <- subset(obj, subset = orig.ident == sample_name)
+  sensitive_obj <- subset(sample_obj, subset = GC_class == "GC_sensitive")
+  
+  if (ncol(sensitive_obj) < 2) {
+    return(c(NA_real_, NA_real_))
+  }
+  
+  coords_sensitive <- GetTissueCoordinates(sensitive_obj)
+  kde <- MASS::kde2d(coords_sensitive$x, coords_sensitive$y)
+  range(kde$z)
+}
+
+density_ranges <- lapply(all_samples, function(sample_name) {
+  get_sensitive_density_range(Fib, sample_name)
+})
+
+global_density_range <- range(unlist(density_ranges), na.rm = TRUE)
+
+############################
+# 8. Plot GC score with density contour
+############################
+plot_gc_score_with_density <- function(obj, sample_name, density_limits) {
+  sample_obj <- subset(obj, subset = orig.ident == sample_name)
+  sensitive_obj <- subset(sample_obj, subset = GC_class == "GC_sensitive")
+  
+  if (ncol(sensitive_obj) < 2) {
+    message("Skipping density plot for sample with too few GC_sensitive spots: ", sample_name)
+    return(NULL)
+  }
+  
+  spatial_coords <- GetTissueCoordinates(sample_obj)
+  spatial_coords_sensitive <- GetTissueCoordinates(sensitive_obj)
+  
+  plot_data <- data.frame(
+    x = spatial_coords$x,
+    y = spatial_coords$y,
+    GC_score = sample_obj$GC_score,
+    is_sensitive = colnames(sample_obj) %in% colnames(sensitive_obj)
+  )
+  
+  plot_data_sensitive <- data.frame(
+    x = spatial_coords_sensitive$x,
+    y = spatial_coords_sensitive$y
+  )
+  
+  contour_breaks <- seq(density_limits[1], density_limits[2], length.out = 10)
+  
+  p <- ggplot(plot_data, aes(x = x, y = y)) +
+    stat_density_2d(
+      data = plot_data_sensitive,
+      aes(fill = after_stat(level)),
+      geom = "polygon",
+      alpha = 0.3,
+      contour = TRUE,
+      breaks = contour_breaks
+    ) +
+    scale_fill_gradientn(
+      colours = c("white", "yellow", "red"),
+      name = "Sensitive Density",
+      limits = density_limits
+    ) +
+    stat_density_2d(
+      data = plot_data_sensitive,
+      color = "black",
+      linewidth = 1,
+      linetype = "dashed",
+      contour = TRUE,
+      breaks = contour_breaks
+    ) +
+    geom_point(aes(color = GC_score), size = 4) +
+    scale_color_gradientn(
+      colours = c("blue", "yellow", "red"),
+      name = "GC Score"
+    ) +
+    geom_point(
+      data = subset(plot_data, is_sensitive),
+      shape = 17,
+      size = 2,
+      color = "black",
+      stroke = 1.5
+    ) +
+    theme_void() +
+    theme(legend.position = "right") +
+    ggtitle(paste0(sample_name, " - GC score with sensitive density"))
+  
+  ggsave(
+    filename = paste0("spatial_gc_score_density_", sample_name, ".pdf"),
+    plot = p,
+    width = 10,
+    height = 10,
+    bg = "white"
+  )
+}
+
+for (sample_name in all_samples) {
+  plot_gc_score_with_density(Fib, sample_name, global_density_range)
+}
+
+############################
+# 9. Plot contour-only figures
+############################
+plot_sensitive_contour_only <- function(obj, sample_name, density_limits) {
+  sample_obj <- subset(obj, subset = orig.ident == sample_name)
+  sensitive_obj <- subset(sample_obj, subset = GC_class == "GC_sensitive")
+  
+  if (ncol(sensitive_obj) < 2) {
+    message("Skipping contour-only plot for sample with too few GC_sensitive spots: ", sample_name)
+    return(NULL)
+  }
+  
+  coords_sensitive <- GetTissueCoordinates(sensitive_obj)
+  
+  plot_data_sensitive <- data.frame(
+    x = coords_sensitive$x,
+    y = coords_sensitive$y
+  )
+  
+  contour_breaks <- seq(density_limits[1], density_limits[2], length.out = 10)
+  
+  p <- ggplot(plot_data_sensitive, aes(x = x, y = y)) +
+    stat_density_2d(
+      aes(fill = after_stat(level)),
+      geom = "polygon",
+      alpha = 0.1,
+      contour = TRUE,
+      breaks = contour_breaks
+    ) +
+    scale_fill_gradientn(
+      colours = c("white", "yellow", "red"),
+      name = "Sensitive Density",
+      limits = density_limits
+    ) +
+    stat_density_2d(
+      color = "black",
+      linewidth = 1,
+      linetype = "dashed",
+      contour = TRUE,
+      breaks = contour_breaks
+    ) +
+    coord_fixed() +
+    theme_void() +
+    theme(
+      legend.position = "right",
+      plot.background = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA)
+    ) +
+    ggtitle(paste0(sample_name, " - Sensitive contour"))
+  
+  ggsave(
+    filename = paste0("spatial_sensitive_contour_", sample_name, ".pdf"),
+    plot = p,
+    width = 10,
+    height = 10,
+    bg = "white"
+  )
+}
+
+for (sample_name in all_samples) {
+  plot_sensitive_contour_only(Fib, sample_name, global_density_range)
+}
