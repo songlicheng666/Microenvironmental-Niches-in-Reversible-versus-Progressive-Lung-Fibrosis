@@ -1,0 +1,272 @@
+############################################################
+# Script name: OP_IPF_SampleLevel_CellComposition_Comparison.R
+# Description:
+#   Compare cell type composition between OP and IPF
+#   using sample-level proportion tables
+############################################################
+
+rm(list = ls())
+options(stringsAsFactors = FALSE)
+
+setwd("E:/path/to/proportion_outputs")
+
+############################
+# 1. Load packages
+############################
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(ggpubr)
+  library(dplyr)
+  library(tidyr)
+  library(tools)
+})
+
+############################
+# 2. Helper functions
+############################
+read_proportion_file <- function(file, sample_name, group_name = NULL) {
+  df <- read.csv(file, stringsAsFactors = FALSE)
+  stopifnot(all(c("Cell_Type", "Percentage") %in% colnames(df)))
+  
+  df$Sample <- sample_name
+  df$Cell_Type <- trimws(as.character(df$Cell_Type))
+  
+  if (!is.null(group_name)) {
+    df$Group <- group_name
+    return(df[, c("Cell_Type", "Percentage", "Sample", "Group")])
+  } else {
+    return(df[, c("Cell_Type", "Percentage", "Sample")])
+  }
+}
+
+infer_group_from_sample <- function(sample_name) {
+  lower_name <- tolower(sample_name)
+  if (grepl("^(op5|op6|op)", lower_name)) {
+    return("OP")
+  } else if (grepl("^(pf4|pf6|ipf)", lower_name)) {
+    return("IPF")
+  } else {
+    return(NA_character_)
+  }
+}
+
+calculate_sem <- function(x) {
+  x <- as.numeric(x)
+  if (sum(!is.na(x)) <= 1) return(NA_real_)
+  sd(x, na.rm = TRUE) / sqrt(sum(!is.na(x)))
+}
+
+make_wide_matrix <- function(df, sample_ids, cell_types) {
+  mat <- sapply(cell_types, function(ct) {
+    sub_df <- df[df$Cell_Type == ct, , drop = FALSE]
+    values <- setNames(sub_df$Percentage, sub_df$Sample)
+    as.numeric(values[sample_ids])
+  })
+  
+  mat <- as.matrix(mat)
+  mat[is.na(mat)] <- 0
+  rownames(mat) <- sample_ids
+  colnames(mat) <- cell_types
+  return(mat)
+}
+
+############################
+# 3. Read manually curated proportion tables
+############################
+op_files <- list(
+  OP261063_1 = "OP261063_1_proportion.csv",
+  ······
+)
+
+ipf_files <- list(
+  IPFLXW_2_1 = "IPF_2_1_LXW_proportion.csv",
+  ······
+)
+
+op_data_manual <- bind_rows(
+  lapply(names(op_files), function(nm) {
+    read_proportion_file(op_files[[nm]], sample_name = nm, group_name = "OP")
+  })
+)
+
+ipf_data_manual <- bind_rows(
+  lapply(names(ipf_files), function(nm) {
+    read_proportion_file(ipf_files[[nm]], sample_name = nm, group_name = "IPF")
+  })
+)
+
+############################
+# 4. Read batch-exported proportion tables
+############################
+prop_dir_batch <- "proportion_outputs"
+
+batch_files <- if (dir.exists(prop_dir_batch)) {
+  list.files(prop_dir_batch, pattern = "_proportion\\.csv$", full.names = TRUE)
+} else {
+  character(0)
+}
+
+read_batch_proportion <- function(file_path) {
+  df <- read.csv(file_path, stringsAsFactors = FALSE)
+  stopifnot(all(c("Cell_Type", "Percentage") %in% colnames(df)))
+  
+  sample_name <- file_path_sans_ext(basename(file_path))
+  sample_name <- sub("_proportion$", "", sample_name, ignore.case = TRUE)
+  
+  df$Sample <- sample_name
+  df$Cell_Type <- trimws(as.character(df$Cell_Type))
+  df$Group <- infer_group_from_sample(sample_name)
+  
+  df[, c("Cell_Type", "Percentage", "Sample", "Group")]
+}
+
+batch_data <- if (length(batch_files) > 0) {
+  bind_rows(lapply(batch_files, read_batch_proportion))
+} else {
+  NULL
+}
+
+if (!is.null(batch_data)) {
+  batch_data <- subset(batch_data, !is.na(Group))
+}
+
+############################
+# 5. Merge all sources
+############################
+long_data <- bind_rows(
+  op_data_manual,
+  ipf_data_manual,
+  batch_data
+)
+
+long_data <- long_data %>%
+  mutate(
+    Cell_Type = trimws(as.character(Cell_Type)),
+    Sample = as.character(Sample),
+    Group = factor(Group, levels = c("OP", "IPF"))
+  )
+
+write.csv(long_data, "OP_IPF_combined_long_data.csv", row.names = FALSE)
+
+############################
+# 6. Define cell type universe
+############################
+all_cell_types <- sort(unique(long_data$Cell_Type))
+
+############################
+# 7. Build sample-level wide matrices
+############################
+op_samples <- sort(unique(long_data$Sample[long_data$Group == "OP"]))
+ipf_samples <- sort(unique(long_data$Sample[long_data$Group == "IPF"]))
+
+op_mat <- make_wide_matrix(
+  df = subset(long_data, Group == "OP"),
+  sample_ids = op_samples,
+  cell_types = all_cell_types
+)
+
+ipf_mat <- make_wide_matrix(
+  df = subset(long_data, Group == "IPF"),
+  sample_ids = ipf_samples,
+  cell_types = all_cell_types
+)
+
+############################
+# 8. Sample-level statistical analysis
+############################
+statistical_results <- data.frame(
+  Cell_Type = all_cell_types,
+  OP_Mean = NA_real_,
+  OP_SEM = NA_real_,
+  IPF_Mean = NA_real_,
+  IPF_SEM = NA_real_,
+  P_value = NA_real_,
+  stringsAsFactors = FALSE
+)
+
+for (i in seq_along(all_cell_types)) {
+  cell_type_i <- all_cell_types[i]
+  op_values <- op_mat[, cell_type_i]
+  ipf_values <- ipf_mat[, cell_type_i]
+  
+  p_value_i <- tryCatch({
+    if (all(op_values == 0) && all(ipf_values == 0)) {
+      NA_real_
+    } else {
+      wilcox.test(op_values, ipf_values)$p.value
+    }
+  }, error = function(e) {
+    NA_real_
+  })
+  
+  statistical_results$OP_Mean[i] <- mean(op_values, na.rm = TRUE)
+  statistical_results$OP_SEM[i] <- calculate_sem(op_values)
+  statistical_results$IPF_Mean[i] <- mean(ipf_values, na.rm = TRUE)
+  statistical_results$IPF_SEM[i] <- calculate_sem(ipf_values)
+  statistical_results$P_value[i] <- p_value_i
+}
+
+statistical_results$P_adj_BH <- p.adjust(statistical_results$P_value, method = "BH")
+
+statistical_results$Significance <- "ns"
+statistical_results$Significance[!is.na(statistical_results$P_adj_BH) & statistical_results$P_adj_BH < 0.05] <- "*"
+statistical_results$Significance[!is.na(statistical_results$P_adj_BH) & statistical_results$P_adj_BH < 0.01] <- "**"
+statistical_results$Significance[!is.na(statistical_results$P_adj_BH) & statistical_results$P_adj_BH < 0.001] <- "***"
+
+statistical_results <- statistical_results[order(is.na(statistical_results$P_adj_BH), statistical_results$P_adj_BH), ]
+
+write.csv(statistical_results, "OP_IPF_sample_level_statistics.csv", row.names = FALSE)
+
+############################
+# 9. Plot sample-level comparison
+############################
+plot_data <- long_data %>%
+  mutate(Cell_Type = factor(Cell_Type, levels = statistical_results$Cell_Type))
+
+base_plot <- ggplot(plot_data, aes(x = Cell_Type, y = Percentage, fill = Group)) +
+  geom_boxplot(outlier.shape = NA, width = 0.7) +
+  geom_point(
+    aes(color = Group),
+    position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.7),
+    size = 1.8,
+    alpha = 0.7
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  ) +
+  labs(
+    title = "Cell Type Composition Comparison Between OP and IPF",
+    x = "Cell Type",
+    y = "Percentage"
+  ) +
+  scale_fill_manual(values = c("OP" = "#3366CC", "IPF" = "#CC3366")) +
+  scale_color_manual(values = c("OP" = "#3366CC", "IPF" = "#CC3366"))
+
+significant_plot <- base_plot +
+  stat_compare_means(
+    aes(group = Group),
+    method = "wilcox.test",
+    label = "p.signif",
+    hide.ns = TRUE
+  )
+
+print(base_plot)
+print(significant_plot)
+
+ggsave("OP_IPF_cell_type_composition_boxplot.pdf", base_plot, width = 12, height = 6)
+ggsave("OP_IPF_cell_type_composition_boxplot_signif.pdf", significant_plot, width = 12, height = 6)
+
+############################
+# 10. Summary
+############################
+cat("\nSummary\n")
+cat("Number of OP samples:", length(op_samples), "\n")
+cat("Number of IPF samples:", length(ipf_samples), "\n")
+cat(
+  "Number of significant cell types (BH-adjusted p < 0.05):",
+  sum(!is.na(statistical_results$P_adj_BH) & statistical_results$P_adj_BH < 0.05),
+  "\n"
+)
