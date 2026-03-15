@@ -1,0 +1,62 @@
+# 加载Seurat包
+library(Seurat)
+library(ggplot2)
+library(tidyverse)
+library(SingleR)
+library(celldex)
+library(RColorBrewer)
+library(SingleCellExperiment)
+library(dplyr)
+library(patchwork)
+library(ggsci)
+library(cowplot)
+library(paletteer)
+library(Seurat)
+library(ggplot2)
+library(RColorBrewer)
+# 假设你的原始Seurat对象名为`seurat_obj`
+# 你的特定barcodes列表
+
+selected_barcodes <- read.csv(file = "E:/机化性肺炎空间转录组/初步分析代码/选择区域/CTRL/55M/re-cluster55m2.csv")  # 替换为你的100个barcodes
+selected_barcodes <- selected_barcodes$Barcode 
+# 使用subset函数提取特定的barcodes
+new_seurat_obj <- subset(CRC.qc, cells = selected_barcodes)
+new_seurat_obj <- RunUMAP(new_seurat_obj, reduction = "pca", dims = 1:15) %>% 
+  FindNeighbors(reduction = "pca", dims = 1:15) %>% 
+  FindClusters(verbose = FALSE)
+# 生成基本的 SpatialDimPlot
+p <- SpatialDimPlot(new_seurat_obj, alpha = c(1, 1), group.by = "seurat_clusters", shape = 21, label = F)
+# 提取数据和颜色信息
+data <- p$data
+colors <- data$seurat_clusters
+# 使用RColorBrewer中的地中海配色
+med_palette <- colorRampPalette(brewer.pal(12, "Set3"))(length(unique(colors)))
+# 创建新的 ggplot 对象
+p_new <- ggplot(data, aes(x = x, y = y, fill = colors)) +
+  geom_point(shape = 21, size = 2, alpha = 1, stroke = 0) +  # stroke = 0 去除边框
+  scale_fill_manual(values = med_palette) +
+  theme_minimal() +
+  theme(legend.position = "right") 
+p_new
+CTRL55m2<-new_seurat_obj
+save(CTRL55m2,file = "CTRL55m2.Rdata")
+DimPlot(CTRL55m2, reduction = "umap", group.by = "seurat_clusters")
+DotPlot(object = CTRL43m2,
+        features = c("G0S2", "FCGR3B",#neu 
+                     'CD3D','CD3E',"CD3G", "CD8A","CD8B","CD4",#T cells
+                     "NKG7","GZMB","KLRD1", #NK cells
+                     "IGHM","CD22","CD79A",'MS4A1','CD79B',#B cell
+                     "CD38", "TNFRSF17", "SDC1","JCHAIN","MZB1","PRDM1", #Plasma cells
+                     'CD14',"HLA-DQB1","C1QA","MARCO", #monocyte/Macrophages
+                     "CLEC10A","CLEC4C", #DC cells
+                     "KIT","GATA2",'TPSB2', #Mast cells
+                     'CDH1','EPCAM',#Epithelial
+                     "SFTPC","SFTPD","AGER","SCGB3A2","SCGB1A1","MUC5B",
+                     "ACKR1",'CLDN5','CDH5', "PECAM1",
+                     "KRT5","KRT7","KRT8","FOXJ1",#Endo
+                     "DCN","VIM","LUM","COL1A2","MYH11"#Fibroblast
+        ),
+        group.by = "seurat_clusters")+coord_flip()
+
+
+
