@@ -1,0 +1,111 @@
+############################################################
+# Script name: 02_OP_Stage_Marker_Heatmap_Top10.R
+# Project: OP spatial transcriptomics
+# Description:
+#   Identify marker genes across early/middle/late groups
+#   and plot top10 marker heatmap based on average expression
+############################################################
+
+rm(list = ls())
+options(stringsAsFactors = FALSE)
+
+setwd("E:/机化性肺炎空间转录组/初步分析代码/早中晚三期/OP早中晚")
+
+#===============================================================================
+# 1. Load packages
+#===============================================================================
+library(Seurat)
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(RColorBrewer)
+library(scales)
+
+#===============================================================================
+# 2. Prepare object
+#===============================================================================
+# 假设 Fib_myo 已经提前载入环境
+Fib_myo <- JoinLayers(Fib_myo)
+Idents(Fib_myo) <- "group"
+
+# 检查分组
+table(Fib_myo$group)
+
+#===============================================================================
+# 3. Find marker genes
+#===============================================================================
+sp_markers <- FindAllMarkers(
+  object = Fib_myo,
+  assay = "Spatial",
+  only.pos = TRUE,
+  min.pct = 0.25,
+  logfc.threshold = 0.25,
+  verbose = TRUE
+)
+
+# 自定义“不在”运算符
+`%!in%` <- function(x, y) !(`%in%`(x, y))
+
+# 过滤核糖体/线粒体基因
+exclude_genes <- grep("^RPL|^RPS|^MT-", sp_markers$gene, value = TRUE)
+
+# 每个 group 取 top10 marker
+sp_markers_top10 <- sp_markers %>%
+  group_by(cluster) %>%
+  dplyr::filter(
+    avg_log2FC > 0,
+    p_val_adj < 0.05,
+    gene %!in% exclude_genes
+  ) %>%
+  slice_max(order_by = avg_log2FC, n = 10) %>%
+  ungroup()
+
+# 保存 marker 结果
+write.csv(sp_markers, "OP_stage_all_markers.csv", row.names = FALSE)
+write.csv(sp_markers_top10, "OP_stage_top10_markers.csv", row.names = FALSE)
+
+#===============================================================================
+# 4. Average expression for heatmap
+#===============================================================================
+sp_markers_avg <- AverageExpression(
+  Fib_myo,
+  assays = "Spatial",
+  return.seurat = TRUE
+)
+
+#===============================================================================
+# 5. Define group colors
+#===============================================================================
+group_cols <- c(
+  "early" = "orange",
+  "middle" = "lightblue",
+  "late" = "green"
+)
+
+#===============================================================================
+# 6. Plot heatmap
+#===============================================================================
+pdf("三阶段差异基因Top10热图.pdf", width = 5, height = 7)
+
+p_heatmap <- DoHeatmap(
+  object = sp_markers_avg,
+  features = unique(sp_markers_top10$gene),
+  size = 3,
+  angle = 90,
+  group.bar.height = 0.01,
+  group.colors = group_cols,
+  disp.min = -2,
+  disp.max = 2,
+  draw.lines = FALSE
+) +
+  scale_fill_gradientn(
+    colours = c("white", "yellow", "red"),
+    limits = c(-2, 2),
+    oob = squish
+  ) +
+  theme(
+    text = element_text(size = 8, color = "black")
+  )
+
+print(p_heatmap)
+dev.off()
