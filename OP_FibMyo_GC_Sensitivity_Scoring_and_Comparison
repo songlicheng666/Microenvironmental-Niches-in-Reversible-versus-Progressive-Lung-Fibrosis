@@ -1,0 +1,530 @@
+############################################################
+# Script name: 03_OP_FibMyo_GC_Sensitivity_SampleLevel_Analysis.R
+# Project: OP spatial transcriptomics
+# Description:
+#   1. Extract Fib_myo from Spatial_merge
+#   2. Calculate GC_response and apoptosis scores
+#   3. Classify Fib_myo into GC_sensitive and GC_low
+#   4. Perform sample-level statistical comparison
+# Note:
+#   Differential/statistical comparisons are performed at the sample level,
+#   NOT at the spot/bin level, to avoid pseudoreplication.
+############################################################
+
+rm(list = ls())
+options(stringsAsFactors = FALSE)
+
+setwd("E:/····")
+
+############################
+# 1. Load packages
+############################
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(rstatix)
+library(ggpubr)
+library(tidyr)
+library(scales)
+library(cowplot)
+
+############################
+# 2. Load object
+############################
+
+# load("Spatial_merge.Rdata")
+
+print(Spatial_merge)
+colnames(Spatial_merge@meta.data)
+
+############################
+# 3. Initialize annotation column
+############################
+Spatial_merge$celltype2 <- Spatial_merge$first_type
+
+############################
+# 4. Extract Fib_myo subset
+############################
+table(Spatial_merge$first_type)
+
+Fib_myo <- subset(Spatial_merge, subset = first_type %in% c("Fib_myo"))
+Fib_myo <- JoinLayers(Fib_myo)
+
+table(Fib_myo$group)
+
+############################
+# 5. Define gene sets
+############################
+markers <- list()
+
+markers$GC_response <- c(
+  "ANXA1", "AQP1", "ASS1", "ATP5F1A", "AXIN2", "BCL2L11", "BCL3", "BCL6",
+  "CASP9", "CFLAR", "CRH", "CYP1B1", "DDIT4", "EDN1", "EGFR",
+  "EIF4E", "FAM107A", "FBXO32", "FECH", "FLT3", "FOXO3", "GJB2",
+  "GSK3A", "HMGCS2", "HNRNPU", "IGF1R", "ISL1", "JAK2", "KLF9",
+  "METTL21C", "MSTN", "MT-ND3", "MYOD1", "NPAS4", "NR3C1", "PCK1",
+  "PCK2", "REST", "RPS6KB1", "SERPINF1", "SMYD3", "SRD5A1", "SSTR2",
+  "SSTR3", "SSTR4", "SSTR5", "STC1", "TBX2", "TFAP4", "TGFB1",
+  "UBE2L3", "UGT1A1", "USP8", "ZFP36", "ZFP36L1", "ZFP36L2", "ZNF764",
+  "PTH", "SST", "CASP10", "CASP2", "CASP3", "CASP4", "CASP6", "CASP8"
+)
+
+markers$apoptosis <- c(
+  "ADD1","AIFM3","ANKH","ANXA1","APP","ATF3","AVPR1A","BAX","BCAP31","BCL10",
+  "BCL2L1","BCL2L10","BCL2L11","BCL2L2","BID","BIK","BIRC3","BMF","BMP2","BNIP3L",
+  "BRCA1","BTG2","BTG3","CASP1","CASP2","CASP3","CASP4","CASP6","CASP7","CASP8",
+  "CASP9","CAV1","CCNA1","CCND1","CCND2","CD14","CD2","CD38","CD44","CD69",
+  "CDC25B","CDK2","CDKN1A","CDKN1B","CFLAR","CLU","CREBBP","CTH","CTNNB1","CYLD",
+  "DAP","DAP3","DCN","DDIT3","DFFA","DIABLO","DNAJA1","DNAJC3","DNM1L","DPYD",
+  "EBP","EGR3","EMP1","ENO2","ERBB2","ERBB3","EREG","ETF1","F2","F2R",
+  "FAS","FASLG","FDXR","FEZ1","GADD45A","GADD45B","GCH1","GNA15","GPX1","GPX3",
+  "GPX4","GSN","GSR","GSTM1","GUCY2D","HGF","HMGB2","HMOX1","HSPB1","IER3",
+  "IFITM3","IFNB1","IFNGR1","IGF2R","IGFBP6","IL18","IL1A","IL1B","IL6","IRF1",
+  "ISG20","JUN","KRT18","LEF1","LGALS3","LMNA","PLPPR4","LUM","MADD","MCL1",
+  "MGMT","MMP2","NEDD9","NEFH","PAK1","PDCD4","PDGFRB","PEA15","PLAT","PLCB2",
+  "PMAIP1","PPP2R5B","PPP3R1","PPT1","PRF1","PSEN1","PSEN2","PTK2","RARA","RELA",
+  "RETSAT","RHOB","RHOT2","RNASEL","ROCK1","SAT1","SATB1","SC5D","SLC20A1","SMAD7",
+  "SOD1","SOD2","SPTAN1","SQSTM1","TAP1","TGFB2","TGFBR3","TIMP1","TIMP2","TIMP3",
+  "TNF","TNFRSF12A","TNFSF10","TOP2A","TSPO","TXNIP","VDAC2","WEE1","XIAP"
+)
+
+############################
+# 6. Add module scores
+############################
+Fib_myo <- AddModuleScore(
+  object = Fib_myo,
+  features = markers,
+  name = "score"
+)
+
+# score1 = GC_response
+# score2 = apoptosis
+summary(Fib_myo$score1)
+summary(Fib_myo$score2)
+
+############################
+# 7. Set factor levels
+############################
+Fib_myo$group <- factor(Fib_myo$group, levels = c("early", "middle", "late"))
+Spatial_merge$group <- factor(Spatial_merge$group, levels = c("early", "middle", "late"))
+
+############################
+# 8. Rename images safely (optional)
+############################
+old_imgs <- names(Fib_myo@images)
+print(old_imgs)
+
+new_imgs <- c(
+  "OP_e1", "OP_e2", ····
+)
+
+if (length(old_imgs) == length(new_imgs)) {
+  for (i in seq_along(old_imgs)) {
+    Fib_myo@images[[new_imgs[i]]] <- Fib_myo@images[[old_imgs[i]]]
+    Fib_myo@images[[old_imgs[i]]] <- NULL
+  }
+} else {
+  warning("Image renaming skipped: length of old image names
+############################################################
+# Script name: 03_OP_FibMyo_GC_Sensitivity_SampleLevel_Analysis.R
+# Project: OP spatial transcriptomics
+# Description:
+#   1. Extract Fib_myo spots from Spatial_merge
+#   2. Calculate GC response and apoptosis module scores
+#   3. Classify Fib_myo into GC_sensitive / GC_low
+#   4. Merge annotations back to Spatial_merge
+#   5. Compare GC-sensitive proportion at sample level
+#   6. Compare apoptosis score at sample level
+#   7. Perform sample-level DEG analysis using pseudobulk
+############################################################
+
+rm(list = ls())
+options(stringsAsFactors = FALSE)
+
+setwd("E:/······")
+
+############################
+# 1. Load packages
+############################
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(rstatix)
+library(ggpubr)
+library(Matrix)
+library(edgeR)
+library(limma)
+library(scales)
+library(patchwork)
+
+############################
+# 2. Prepare object
+############################
+
+# load("your_object.Rdata")
+
+Spatial_merge$celltype2 <- Spatial_merge$first_type
+
+Fib_myo <- subset(Spatial_merge, subset = first_type == "Fib_myo")
+Fib_myo <- JoinLayers(Fib_myo)
+
+Fib_myo$group <- factor(Fib_myo$group, levels = c("early", "middle", "late"))
+Spatial_merge$group <- factor(Spatial_merge$group, levels = c("early", "middle", "late"))
+
+print(table(Fib_myo$group))
+print(table(Fib_myo$orig.ident, Fib_myo$group))
+
+############################
+# 3. Define gene sets
+############################
+markers <- list()
+
+markers$GC_response <- c(
+  "ANXA1", "AQP1", "ASS1", "ATP5F1A", "AXIN2", "BCL2L11", "BCL3", "BCL6",
+  "CASP9", "CFLAR", "CRH", "CYP1B1", "DDIT4", "EDN1", "EGFR",
+  "EIF4E", "FAM107A", "FBXO32", "FECH", "FLT3", "FOXO3", "GJB2",
+  "GSK3A", "HMGCS2", "HNRNPU", "IGF1R", "ISL1", "JAK2", "KLF9",
+  "METTL21C", "MSTN", "MT-ND3", "MYOD1", "NPAS4", "NR3C1", "PCK1",
+  "PCK2", "REST", "RPS6KB1", "SERPINF1", "SMYD3", "SRD5A1", "SSTR2",
+  "SSTR3", "SSTR4", "SSTR5", "STC1", "TBX2", "TFAP4", "TGFB1",
+  "UBE2L3", "UGT1A1", "USP8", "ZFP36", "ZFP36L1", "ZFP36L2", "ZNF764",
+  "PTH", "SST", "CASP10", "CASP2", "CASP3", "CASP4", "CASP6", "CASP8"
+)
+
+markers$apoptosis <- c(
+  "ADD1","AIFM3","ANKH","ANXA1","APP","ATF3","AVPR1A","BAX","BCAP31","BCL10",
+  "BCL2L1","BCL2L10","BCL2L11","BCL2L2","BID","BIK","BIRC3","BMF","BMP2",
+  "BNIP3L","BRCA1","BTG2","BTG3","CASP1","CASP2","CASP3","CASP4","CASP6",
+  "CASP7","CASP8","CASP9","CAV1","CCNA1","CCND1","CCND2","CD14","CD2","CD38",
+  "CD44","CD69","CDC25B","CDK2","CDKN1A","CDKN1B","CFLAR","CLU","CREBBP","CTH",
+  "CTNNB1","CYLD","DAP","DAP3","DCN","DDIT3","DFFA","DIABLO","DNAJA1","DNAJC3",
+  "DNM1L","DPYD","EBP","EGR3","EMP1","ENO2","ERBB2","ERBB3","EREG","ETF1","F2",
+  "F2R","FAS","FASLG","FDXR","FEZ1","GADD45A","GADD45B","GCH1","GNA15","GPX1",
+  "GPX3","GPX4","GSN","GSR","GSTM1","GUCY2D","HGF","HMGB2","HMOX1","HSPB1",
+  "IER3","IFITM3","IFNB1","IFNGR1","IGF2R","IGFBP6","IL18","IL1A","IL1B","IL6",
+  "IRF1","ISG20","JUN","KRT18","LEF1","LGALS3","LMNA","PLPPR4","LUM","MADD",
+  "MCL1","MGMT","MMP2","NEDD9","NEFH","PAK1","PDCD4","PDGFRB","PEA15","PLAT",
+  "PLCB2","PMAIP1","PPP2R5B","PPP3R1","PPT1","PRF1","PSEN1","PSEN2","PTK2","RARA",
+  "RELA","RETSAT","RHOB","RHOT2","RNASEL","ROCK1","SAT1","SATB1","SC5D","SLC20A1",
+  "SMAD7","SOD1","SOD2","SPTAN1","SQSTM1","TAP1","TGFB2","TGFBR3","TIMP1","TIMP2",
+  "TIMP3","TNF","TNFRSF12A","TNFSF10","TOP2A","TSPO","TXNIP","VDAC2","WEE1","XIAP"
+)
+
+############################
+# 4. Module scoring
+############################
+Fib_myo <- AddModuleScore(
+  object = Fib_myo,
+  features = markers,
+  name = "score"
+)
+
+# score1 = GC_response, score2 = apoptosis
+summary(Fib_myo$score1)
+summary(Fib_myo$score2)
+
+############################
+# 5. Define GC_sensitive / GC_low
+############################
+threshold_gc <- quantile(Fib_myo$score1, 0.75, na.rm = TRUE)
+
+Fib_myo$celltype2 <- ifelse(
+  Fib_myo$score1 >= threshold_gc,
+  "GC_sensitive",
+  "GC_low"
+)
+
+Fib_myo$celltype2 <- factor(Fib_myo$celltype2, levels = c("GC_low", "GC_sensitive"))
+
+print(table(Fib_myo$celltype2))
+print(table(Fib_myo$group, Fib_myo$celltype2))
+
+############################
+# 6. Merge annotations back to Spatial_merge
+############################
+new_celltypes <- Fib_myo$celltype2
+names(new_celltypes) <- colnames(Fib_myo)
+
+Spatial_merge$celltype2[names(new_celltypes)] <- as.character(new_celltypes)
+
+print(table(Spatial_merge$celltype2))
+print(table(Spatial_merge$group, Spatial_merge$celltype2))
+
+############################
+# 7. Save metadata
+############################
+metadata_myo <- data.frame(
+  celltype2 = Fib_myo$celltype2,
+  row.names = colnames(Fib_myo)
+)
+write.csv(metadata_myo, file = "Fib_myo_GC_annotation.csv")
+
+metadata_all <- data.frame(
+  celltype2 = Spatial_merge$celltype2,
+  row.names = colnames(Spatial_merge)
+)
+write.csv(metadata_all, file = "Spatial_merge_GC_annotation.csv")
+
+save(Fib_myo, Spatial_merge, file = "Fib_myo_GC_sensitive_annotation.Rdata")
+
+############################
+# 8. Sample-level proportion analysis
+############################
+md <- Fib_myo@meta.data %>%
+  as.data.frame() %>%
+  filter(celltype2 %in% c("GC_sensitive", "GC_low")) %>%
+  filter(!is.na(group), !is.na(orig.ident))
+
+prop_by_sample <- md %>%
+  group_by(orig.ident, group, celltype2) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = celltype2, values_from = n, values_fill = 0) %>%
+  mutate(
+    n_total = GC_sensitive + GC_low,
+    prop_sensitive = GC_sensitive / n_total
+  )
+
+write.csv(prop_by_sample, file = "GC_sensitive_proportion_by_sample.csv", row.names = FALSE)
+
+kw_prop <- kruskal_test(prop_by_sample, prop_sensitive ~ group)
+dunn_prop <- dunn_test(prop_by_sample, prop_sensitive ~ group, p.adjust.method = "BH")
+
+print(kw_prop)
+print(dunn_prop)
+
+p_prop <- ggplot(prop_by_sample, aes(x = group, y = prop_sensitive, color = group)) +
+  geom_boxplot(outlier.shape = NA, width = 0.6, fill = "grey95", color = "black") +
+  geom_jitter(width = 0.15, size = 2, alpha = 0.8) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "GC_sensitive proportion by sample",
+    x = "Group",
+    y = "GC_sensitive proportion"
+  ) +
+  theme_classic()
+
+ggsave("GC_sensitive_proportion_by_sample.pdf", p_prop, width = 6, height = 5)
+
+############################
+# 9. Sample-level apoptosis score analysis
+############################
+# apoptosis score
+score2_by_sample <- md %>%
+  group_by(orig.ident, group, celltype2) %>%
+  summarise(
+    mean_score2 = mean(score2, na.rm = TRUE),
+    median_score2 = median(score2, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+write.csv(score2_by_sample, file = "Apoptosis_score_by_sample.csv", row.names = FALSE)
+
+#  GC_sensitive vs GC_low
+wilc_score2_by_group <- score2_by_sample %>%
+  group_by(group) %>%
+  wilcox_test(mean_score2 ~ celltype2) %>%
+  adjust_pvalue(method = "BH") %>%
+  add_significance()
+
+eff_score2_by_group <- score2_by_sample %>%
+  group_by(group) %>%
+  wilcox_effsize(mean_score2 ~ celltype2, ci = TRUE)
+
+print(wilc_score2_by_group)
+print(eff_score2_by_group)
+
+p_score2 <- ggplot(score2_by_sample, aes(x = group, y = mean_score2, fill = celltype2)) +
+  geom_boxplot(outlier.shape = NA, position = position_dodge(width = 0.7), width = 0.6) +
+  geom_jitter(
+    position = position_jitterdodge(jitter.width = 0.1, dodge.width = 0.7),
+    size = 1.8,
+    alpha = 0.8
+  ) +
+  labs(
+    title = "Sample-level apoptosis score",
+    x = "Group",
+    y = "Mean apoptosis score per sample"
+  ) +
+  theme_classic()
+
+ggsave("Apoptosis_score_by_sample.pdf", p_score2, width = 7, height = 5)
+
+############################
+# 10. Spatial visualization of GC score
+############################
+old_imgs <- names(Fib_myo@images)
+print(old_imgs)
+
+# new_imgs <- c("OP_e1", "OP_e2", "OP_l1",······)
+# stopifnot(length(old_imgs) == length(new_imgs))
+# for (i in seq_along(old_imgs)) {
+#   Fib_myo@images[[new_imgs[i]]] <- Fib_myo@images[[old_imgs[i]]]
+#   Fib_myo@images[[old_imgs[i]]] <- NULL
+# }
+
+# SpatialFeaturePlot(
+#   Fib_myo,
+#   features = "score1",
+#   images = c("PH_268167_l", "PH_261063_m"),
+#   image.scale = "hires",
+#   alpha = c(0.1, 1),
+#   ncol = 2,
+#   min.cutoff = 0,
+#   max.cutoff = 1
+# )
+
+############################
+# 11. Sample-level DEG analysis (PSEUDOBULK)
+
+fib_deg <- Fib_myo[, Fib_myo$celltype2 %in% c("GC_sensitive", "GC_low")]
+
+counts_mat <- GetAssayData(fib_deg, assay = "Spatial", slot = "counts")
+
+meta_deg <- fib_deg@meta.data %>%
+  as.data.frame() %>%
+  dplyr::select(orig.ident, group, celltype2)
+
+meta_deg$pseudo_id <- paste(meta_deg$orig.ident, meta_deg$celltype2, sep = "__")
+
+pseudo_ids <- unique(meta_deg$pseudo_id)
+
+pb_counts <- sapply(pseudo_ids, function(pid) {
+  cols <- rownames(meta_deg)[meta_deg$pseudo_id == pid]
+  Matrix::rowSums(counts_mat[, cols, drop = FALSE])
+})
+
+pb_counts <- as.matrix(pb_counts)
+
+pb_meta <- meta_deg %>%
+  dplyr::select(orig.ident, group, celltype2, pseudo_id) %>%
+  distinct() %>%
+  as.data.frame()
+
+rownames(pb_meta) <- pb_meta$pseudo_id
+pb_meta <- pb_meta[colnames(pb_counts), ]
+
+print(dim(pb_counts))
+print(table(pb_meta$group, pb_meta$celltype2))
+
+# edgeR + limma-voom
+dge <- DGEList(counts = pb_counts)
+keep <- filterByExpr(dge, group = pb_meta$celltype2)
+dge <- dge[keep, , keep.lib.sizes = FALSE]
+dge <- calcNormFactors(dge)
+
+design <- model.matrix(~ group + celltype2, data = pb_meta)
+colnames(design) <- make.names(colnames(design))
+print(design)
+
+v <- voom(dge, design, plot = TRUE)
+fit <- lmFit(v, design)
+fit <- eBayes(fit)
+
+deg_gc <- topTable(
+  fit,
+  coef = "celltype2GC_sensitive",
+  number = Inf,
+  sort.by = "P"
+)
+
+deg_gc$gene <- rownames(deg_gc)
+write.csv(deg_gc, file = "Pseudobulk_DEG_GC_sensitive_vs_GC_low.csv", row.names = FALSE)
+
+deg_gc_sig <- deg_gc %>%
+  filter(adj.P.Val < 0.05 & abs(logFC) > 0.5)
+
+write.csv(deg_gc_sig, file = "Pseudobulk_DEG_GC_sensitive_vs_GC_low_sig.csv", row.names = FALSE)
+
+############################
+# 12. Optional: sample-level DEG among stages
+############################
+
+fib_gc_sensitive <- Fib_myo[, Fib_myo$celltype2 == "GC_sensitive"]
+counts_gc <- GetAssayData(fib_gc_sensitive, assay = "Spatial", slot = "counts")
+
+meta_gc <- fib_gc_sensitive@meta.data %>%
+  as.data.frame() %>%
+  dplyr::select(orig.ident, group)
+
+meta_gc$pseudo_id <- meta_gc$orig.ident
+
+pseudo_ids_gc <- unique(meta_gc$pseudo_id)
+
+pb_counts_gc <- sapply(pseudo_ids_gc, function(pid) {
+  cols <- rownames(meta_gc)[meta_gc$pseudo_id == pid]
+  Matrix::rowSums(counts_gc[, cols, drop = FALSE])
+})
+
+pb_counts_gc <- as.matrix(pb_counts_gc)
+
+pb_meta_gc <- meta_gc %>%
+  distinct() %>%
+  as.data.frame()
+rownames(pb_meta_gc) <- pb_meta_gc$pseudo_id
+pb_meta_gc <- pb_meta_gc[colnames(pb_counts_gc), ]
+
+dge_gc <- DGEList(counts = pb_counts_gc)
+keep_gc <- filterByExpr(dge_gc, group = pb_meta_gc$group)
+dge_gc <- dge_gc[keep_gc, , keep.lib.sizes = FALSE]
+dge_gc <- calcNormFactors(dge_gc)
+
+design_gc <- model.matrix(~ 0 + group, data = pb_meta_gc)
+colnames(design_gc) <- gsub("^group", "", colnames(design_gc))
+
+v_gc <- voom(dge_gc, design_gc, plot = TRUE)
+fit_gc <- lmFit(v_gc, design_gc)
+
+contrast_gc <- makeContrasts(
+  middle_vs_early = middle - early,
+  late_vs_early = late - early,
+  late_vs_middle = late - middle,
+  levels = design_gc
+)
+
+fit_gc2 <- contrasts.fit(fit_gc, contrast_gc)
+fit_gc2 <- eBayes(fit_gc2)
+
+deg_middle_vs_early <- topTable(fit_gc2, coef = "middle_vs_early", number = Inf)
+deg_late_vs_early   <- topTable(fit_gc2, coef = "late_vs_early", number = Inf)
+deg_late_vs_middle  <- topTable(fit_gc2, coef = "late_vs_middle", number = Inf)
+
+deg_middle_vs_early$gene <- rownames(deg_middle_vs_early)
+deg_late_vs_early$gene   <- rownames(deg_late_vs_early)
+deg_late_vs_middle$gene  <- rownames(deg_late_vs_middle)
+
+write.csv(deg_middle_vs_early, "Pseudobulk_DEG_GCsensitive_middle_vs_early.csv", row.names = FALSE)
+write.csv(deg_late_vs_early,   "Pseudobulk_DEG_GCsensitive_late_vs_early.csv", row.names = FALSE)
+write.csv(deg_late_vs_middle,  "Pseudobulk_DEG_GCsensitive_late_vs_middle.csv", row.names = FALSE)
+
+############################
+# 13. Correlation plot
+############################
+correlation_data <- Fib_myo@meta.data
+
+p_cor <- ggplot(correlation_data, aes(x = score1, y = score2)) +
+  geom_point(alpha = 0.15, color = "steelblue") +
+  geom_smooth(method = "lm", color = "red", se = TRUE) +
+  stat_cor(method = "pearson", size = 5) +
+  labs(
+    title = "Correlation between GC score and apoptosis score",
+    x = "GC response score (score1)",
+    y = "Apoptosis score (score2)"
+  ) +
+  theme_classic(base_size = 13)
+
+ggsave("GCscore_Apoptosis_correlation.pdf", p_cor, width = 6, height = 6)
+
+############################
+# 14. Save final objects
+############################
+save(
+  Fib_myo,
+  Spatial_merge,
+  prop_by_sample,
+  score2_by_sample,
+  deg_gc,
+  deg_gc_sig,
+  file = "OP_FibMyo_GC_Sensitivity_SampleLevel_Analysis.Rdata"
+)
