@@ -1,0 +1,436 @@
+############################################################
+# Script name: 01_VisiumHD_CTD_LCB_Load_QC_Clustering.R
+# Project: Visium HD spatial transcriptomics analysis
+# Sample: CTD_LCB
+# Author: 
+# Date: 
+# Description:
+#   1) Load Visium HD data into Seurat
+#   2) Perform QC
+#   3) Normalize, PCA, UMAP, clustering
+#   4) Spatial and marker visualization
+############################################################
+
+############################
+# 0. Environment setup
+############################
+rm(list = ls())
+options(stringsAsFactors = FALSE)
+
+setwd("E:/机化性肺炎空间转录组/初步分析代码/选择区域/CTD/LCB")
+
+############################
+# 1. Load packages
+############################
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(qs)
+library(hdf5r)
+library(arrow)
+library(png)
+library(jsonlite)
+library(cowplot)
+
+############################
+# 2. Define paths
+############################
+data_dir <- "F:/机化性肺炎/CTD_LCB,IPF_LJ临时存放/Result_X101SC24040644-Z01-J007/Result_X101SC24040644-Z01-J007/1.SpaceRanger/CTD_LCB/binned_outputs/square_008um"
+spatial_dir <- file.path(data_dir, "spatial")
+matrix_dir <- file.path(data_dir, "filtered_feature_bc_matrix")
+output_dir <- "./Outplot"
+
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+############################
+# 3. Custom function for Visium HD image
+############################
+ReadHD_Image <- function(image.dir,
+                         image.name = "tissue_lowres_image.png",
+                         filter.matrix = TRUE) {
+  image <- png::readPNG(source = file.path(image.dir, image.name))
+  scale.factors <- jsonlite::fromJSON(txt = file.path(image.dir, "scalefactors_json.json"))
+
+  tissue.positions.path <- Sys.glob(paths = file.path(image.dir, "tissue_positions*"))
+  tissue.positions <- arrow::read_parquet(tissue.positions.path) %>% as.data.frame()
+
+  rownames(tissue.positions) <- tissue.positions$barcode
+  tissue.positions <- tissue.positions[, -1]
+  colnames(tissue.positions) <- c("tissue", "row", "col", "imagerow", "imagecol")
+
+  if (filter.matrix) {
+    tissue.positions <- tissue.positions[tissue.positions$tissue == 1, , drop = FALSE]
+  }
+
+  unnormalized.radius <- scale.factors$fiducial_diameter_fullres * scale.factors$tissue_lowres_scalef
+  spot.radius <- unnormalized.radius / max(dim(image))
+
+  new(
+    Class = "VisiumV1",
+    image = image,
+    scale.factors = scalefactors(
+      spot = scale.factors$tissue_hires_scalef,
+      fiducial = scale.factors$fiducial_diameter_fullres,
+      hires = scale.factors$tissue_hires_scalef,
+      lowres = scale.factors$tissue_lowres_scalef
+    ),
+    coordinates = tissue.positions,
+    spot.radius = spot.radius
+  )
+}
+
+############################
+# 4. Custom function for loading Visium HD Seurat object
+############################
+Load10X_HD <- function(data.dir,
+                       filename = "filtered_feature_bc_matrix.h5",
+                       assay = "Spatial",
+                       slice = "slice1",
+                       filter.matrix = TRUE,
+                       to.upper = FALSE,
+                       image = NULL) {
+  if (length(data.dir) > 1) {
+    warning("'Load10X_HD' accepts only one 'data.dir'", immediate. = TRUE)
+    data.dir <- data.dir[1]
+  }
+
+  data <- Read10X_h5(filename = file.path(data.dir, filename))
+
+  if (to.upper) {
+    rownames(data) <- toupper(rownames(data))
+  }
+
+  object <- CreateSeuratObject(counts = data, assay = assay)
+
+  if (is.null(image)) {
+    image <- ReadHD_Image(
+      image.dir = file.path(data.dir, "spatial"),
+      filter.matrix = filter.matrix
+    )
+  } else {
+    if (!inherits(image, "VisiumV1")) {
+      stop("Image must be an object of class 'VisiumV1'.")
+    }
+  }
+
+  image <- image[Cells(object)]
+  DefaultAssay(image) <- assay
+  object[[slice]] <- image
+
+  return(object)
+}
+
+############################
+# 5. QC function
+############################
+scQCSpatial <- function(seu) {
+  seu$log10GenesPerUMI <- log10(seu$nFeature_Spatial) / log10(seu$nCount_Spatial)
+
+  mito_genes <- rownames(seu)[grep("^MT-", rownames(seu))]
+  message("Mito genes detected: ", length(mito_genes))
+  seu <- PercentageFeatureSet(seu, pattern = "^MT-", col.name = "percent.mt")
+
+  ribo_genes <- rownames(seu)[grep("^RP[SL]", rownames(seu), ignore.case = TRUE)]
+  message("Ribo genes detected: ", length(ribo_genes))
+  seu <- PercentageFeatureSet(seu, pattern = "^RP[SL]", col.name = "percent.ribo")
+
+  hb_genes <- rownames(seu)[grep("^HB[^(P)]", rownames(seu), ignore.case = TRUE)]
+  message("HB genes detected: ", length(hb_genes))
+  seu <- PercentageFeatureSet(seu, pattern = "^HB[^(P)]", col.name = "percent.hb")
+
+  return(seu)
+}
+
+############################
+# 6. Load Visium HD data
+############################
+ctd <- Load10X_HD(
+  data.dir = data_dir,
+  filename = "filtered_feature_bc_matrix.h5",
+  assay = "Spatial",
+  slice = "CTD"
+)
+
+ctd <- NormalizeData(ctd)
+
+############################
+# 7. Initial spatial feature visualization
+############################
+p_col1a1 <- SpatialFeaturePlot(
+  object = ctd,
+  features = "COL1A1",
+  images = "CTD",
+  alpha = 0.8,
+  pt.size.factor = 0.1,
+  stroke = 0
+)
+
+ggsave(
+  filename = file.path(output_dir, "SpatialFeature_COL1A1_VisiumHD.png"),
+  plot = p_col1a1,
+  width = 6,
+  height = 6
+)
+
+p_sftpd <- SpatialFeaturePlot(
+  object = ctd,
+  features = "SFTPD",
+  images = "CTD",
+  alpha = 1,
+  pt.size.factor = 0.1,
+  stroke = 0
+)
+
+ggsave(
+  filename = file.path(output_dir, "SpatialFeature_SFTPD_VisiumHD.png"),
+  plot = p_sftpd,
+  width = 6,
+  height = 6
+)
+
+############################
+# 8. QC analysis
+############################
+ctd <- NormalizeData(ctd)
+ctd <- scQCSpatial(ctd)
+
+p_vln <- VlnPlot(
+  ctd,
+  pt.size = 0,
+  features = c("nFeature_Spatial", "nCount_Spatial", "percent.mt"),
+  ncol = 3
+)
+
+ggsave(
+  filename = file.path(output_dir, "Step2_QC_VlnPlot.png"),
+  plot = p_vln,
+  width = 14,
+  height = 5
+)
+
+############################
+# 9. Filtering
+############################
+ctd_qc <- subset(
+  ctd,
+  subset = nFeature_Spatial >= 50 &
+    nCount_Spatial >= 50 &
+    percent.mt < 15
+)
+
+print(ctd_qc)
+print(ctd)
+
+p_jchain <- SpatialFeaturePlot(
+  object = ctd_qc,
+  features = "JCHAIN",
+  images = "CTD",
+  alpha = 1,
+  pt.size.factor = 0.1,
+  stroke = 0
+)
+
+ggsave(
+  filename = file.path(output_dir, "SpatialFeature_JCHAIN_afterQC.png"),
+  plot = p_jchain,
+  width = 6,
+  height = 6
+)
+
+############################
+# 10. Standard workflow: Normalize + HVG + Scale + PCA
+############################
+ctd_qc <- ctd_qc %>%
+  NormalizeData(verbose = FALSE) %>%
+  FindVariableFeatures(selection.method = "vst", nfeatures = 2000, verbose = FALSE) %>%
+  ScaleData(verbose = FALSE) %>%
+  RunPCA(npcs = 50, verbose = FALSE)
+
+############################
+# 11. UMAP and clustering
+############################
+ctd_qc <- ctd_qc %>%
+  RunUMAP(reduction = "pca", dims = 1:10) %>%
+  FindNeighbors(reduction = "pca", dims = 1:10) %>%
+  FindClusters(verbose = FALSE)
+
+p_umap <- DimPlot(ctd_qc, reduction = "umap", label = TRUE, raster = TRUE)
+ggsave(
+  filename = file.path(output_dir, "Step3_UMAP.png"),
+  plot = p_umap,
+  width = 6,
+  height = 6
+)
+
+p_spatial_cluster <- SpatialDimPlot(
+  ctd_qc,
+  label = FALSE,
+  pt.size.factor = 0.15,
+  stroke = 0
+)
+
+ggsave(
+  filename = file.path(output_dir, "Step3_SpatialDimPlot.png"),
+  plot = p_spatial_cluster,
+  width = 6,
+  height = 6
+)
+
+############################
+# 12. Export cluster results
+############################
+write.csv(
+  cbind(
+    Barcode = colnames(ctd_qc),
+    Cluster = ctd_qc@meta.data$seurat_clusters
+  ),
+  file = "barcode_clusters_CTD.csv",
+  row.names = FALSE
+)
+
+############################
+# 13. Marker dot plot
+############################
+marker_genes <- c(
+  "G0S2", "FCGR3B",                    # neutrophil
+  "CD3D", "CD3E", "CD3G", "CD8A", "CD8B", "CD4",   # T cells
+  "NKG7", "GZMB", "KLRD1",            # NK cells
+  "IGHM", "CD22", "CD79A", "MS4A1", "CD79B",       # B cells
+  "CD38", "TNFRSF17", "SDC1", "JCHAIN", "MZB1", "PRDM1", # plasma cells
+  "CD14", "HLA-DQB1", "C1QA", "MARCO",             # monocyte/macrophage
+  "CLEC10A", "CLEC4C",                 # DC cells
+  "KIT", "GATA2", "TPSB2",             # mast cells
+  "CDH1", "EPCAM",                     # epithelial
+  "SFTPC", "SFTPD", "AGER", "SCGB3A2", "SCGB1A1", "MUC5B",
+  "ACKR1", "CLDN5", "CDH5", "PECAM1",  # endothelial
+  "DCN", "VIM", "LUM", "COL1A2", "MYH11" # fibroblast
+)
+
+p_dot <- DotPlot(
+  object = ctd_qc,
+  features = marker_genes,
+  group.by = "seurat_clusters"
+) + coord_flip()
+
+ggsave(
+  filename = file.path(output_dir, "Step4_Marker_DotPlot.png"),
+  plot = p_dot,
+  width = 14,
+  height = 10
+)
+
+############################
+# 14. Helper function for FeaturePlot
+############################
+plot_feature_umap <- function(seu, gene, cols = c("lightgrey", "blue", "red")) {
+  FeaturePlot(
+    seu,
+    reduction = "umap",
+    features = gene,
+    cols = cols,
+    pt.size = 1
+  ) +
+    theme(
+      panel.border = element_rect(fill = NA, color = "black", linewidth = 0.5, linetype = "solid")
+    )
+}
+
+plot_feature_spatial <- function(seu, gene, image_name = "CTD") {
+  SpatialFeaturePlot(
+    object = seu,
+    features = gene,
+    images = image_name,
+    alpha = 1,
+    pt.size.factor = 0.1,
+    stroke = 0
+  )
+}
+
+############################
+# 15. Marker visualization examples
+############################
+
+## Epithelial markers
+p_epi1 <- plot_feature_umap(ctd_qc, "SCGB3A2")
+p_epi2 <- plot_feature_umap(ctd_qc, "SFTPC")
+p_epi3 <- plot_feature_spatial(ctd_qc, "SCGB3A2", "CTD")
+p_epi4 <- plot_feature_spatial(ctd_qc, "SFTPC", "CTD")
+
+p_epi <- plot_grid(p_epi1, p_epi2, p_epi3, p_epi4)
+ggsave(
+  filename = file.path(output_dir, "Marker_Epithelial.png"),
+  plot = p_epi,
+  width = 12,
+  height = 8
+)
+
+## Fibroblast markers
+p_fib1 <- plot_feature_umap(ctd_qc, "COL1A2")
+p_fib2 <- plot_feature_umap(ctd_qc, "DCN")
+p_fib <- plot_grid(p_fib1, p_fib2)
+
+ggsave(
+  filename = file.path(output_dir, "Marker_Fibroblast.png"),
+  plot = p_fib,
+  width = 8,
+  height = 4
+)
+
+## Endothelial markers
+p_endo1 <- plot_feature_umap(ctd_qc, "CLDN5")
+p_endo2 <- plot_feature_umap(ctd_qc, "PECAM1")
+p_endo <- plot_grid(p_endo1, p_endo2)
+
+ggsave(
+  filename = file.path(output_dir, "Marker_Endothelial.png"),
+  plot = p_endo,
+  width = 8,
+  height = 4
+)
+
+## T cell markers
+p_t1 <- plot_feature_umap(ctd_qc, "CD3D")
+p_t2 <- plot_feature_umap(ctd_qc, "CD3E")
+p_t3 <- plot_feature_umap(ctd_qc, "CD3G")
+p_t <- plot_grid(p_t1, p_t2, p_t3)
+
+ggsave(
+  filename = file.path(output_dir, "Marker_Tcell.png"),
+  plot = p_t,
+  width = 12,
+  height = 4
+)
+
+## B cell markers
+p_b1 <- plot_feature_umap(ctd_qc, "CD79A")
+p_b2 <- plot_feature_umap(ctd_qc, "MZB1")
+p_b3 <- plot_feature_umap(ctd_qc, "MS4A1")
+p_b4 <- plot_feature_umap(ctd_qc, "CD79B")
+p_b <- plot_grid(p_b1, p_b2, p_b3, p_b4)
+
+ggsave(
+  filename = file.path(output_dir, "Marker_Bcell.png"),
+  plot = p_b,
+  width = 12,
+  height = 8
+)
+
+## Plasma cell markers
+p_plasma1 <- plot_feature_umap(ctd_qc, "CD38")
+p_plasma2 <- plot_feature_umap(ctd_qc, "JCHAIN")
+p_plasma3 <- plot_feature_umap(ctd_qc, "IGHG1")
+p_plasma4 <- plot_feature_umap(ctd_qc, "XBP1")
+p_plasma <- plot_grid(p_plasma1, p_plasma2, p_plasma3, p_plasma4)
+
+ggsave(
+  filename = file.path(output_dir, "Marker_Plasma.png"),
+  plot = p_plasma,
+  width = 12,
+  height = 8
+)
+
+############################
+# 16. Save workspace
+############################
+save(ctd_qc, file = "LCB_after_dimred_before_annotation.Rdata")
