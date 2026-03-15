@@ -1,0 +1,133 @@
+############################################################
+# Script name: OP_Samplewise_NeighborhoodEnrichment_Analysis.R
+# Description:
+#   Run neighborhood enrichment analysis for OP samples
+#   and merge z-score results across samples
+############################################################
+
+rm(list = ls())
+options(stringsAsFactors = FALSE)
+
+setwd("E:/path/to/semla/neighborhood_analysis")
+
+############################
+# 1. Load packages
+############################
+suppressPackageStartupMessages({
+  library(semla)
+  library(tibble)
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(patchwork)
+})
+
+############################
+# 2. Define sample objects
+############################
+sample_names <- c(
+  "OP_187765_1", "OP_187765_2", "OP_187765_3",
+ ······
+)
+
+sample_list <- mget(sample_names)
+
+############################
+# 3. Optional: assign celltype from annotation table
+############################
+# Expected columns in df:
+#   rownames(df) or barcode column matching spot names
+#   orig.ident
+#   RCTD_annotation
+#
+# Uncomment and adapt if annotation assignment is needed.
+
+# stopifnot(exists("df"))
+# stopifnot("orig.ident" %in% colnames(df))
+# stopifnot("RCTD_annotation" %in% colnames(df))
+#
+# for (sample_name in names(sample_list)) {
+#   obj <- sample_list[[sample_name]]
+#   df_sub <- df %>% filter(orig.ident == sample_name)
+#   ann_vec <- df_sub[colnames(obj), "RCTD_annotation"]
+#   obj$celltype <- as.factor(ann_vec)
+#   sample_list[[sample_name]] <- obj
+# }
+
+############################
+# 4. Ensure celltype exists and is a factor
+############################
+for (sample_name in names(sample_list)) {
+  obj <- sample_list[[sample_name]]
+  
+  if (!"celltype" %in% colnames(obj@meta.data)) {
+    stop(paste("Missing 'celltype' column in sample:", sample_name))
+  }
+  
+  obj$celltype <- as.factor(obj$celltype)
+  sample_list[[sample_name]] <- obj
+}
+
+############################
+# 5. Save processed sample objects
+############################
+list2env(sample_list, envir = .GlobalEnv)
+
+save(
+  list = names(sample_list),
+  file = "OP_sample_objects_with_celltype.Rdata"
+)
+
+############################
+# 6. Run neighborhood enrichment analysis
+############################
+n_cores_to_use <- max(1, parallel::detectCores() - 6)
+
+res_net_list <- lapply(names(sample_list), function(sample_name) {
+  message("Running neighborhood enrichment for: ", sample_name)
+  
+  obj <- sample_list[[sample_name]]
+  
+  res <- RunNeighborhoodEnrichmentTest(
+    obj,
+    column_name = "celltype",
+    n_permutations = 1000,
+    nCores = n_cores_to_use
+  )
+  
+  res$sample <- sample_name
+  return(res)
+})
+
+names(res_net_list) <- names(sample_list)
+
+save(res_net_list, file = "OP_neighborhood_enrichment_results.Rdata")
+
+############################
+# 7. Extract and merge z-score tables
+############################
+zscore_list <- lapply(names(res_net_list), function(sample_name) {
+  res_df <- res_net_list[[sample_name]]
+  
+  res_df %>%
+    dplyr::select(label_label, z_score) %>%
+    dplyr::rename(!!sample_name := z_score)
+})
+
+merged_zscore_df <- Reduce(function(x, y) {
+  full_join(x, y, by = "label_label")
+}, zscore_list)
+
+write.csv(
+  merged_zscore_df,
+  file = "OP_neighborhood_enrichment_zscore_merged.csv",
+  row.names = FALSE
+)
+
+############################
+# 8. Optional summary
+############################
+cat("\nSummary\n")
+cat("Number of samples processed:", length(sample_list), "\n")
+cat("Number of label pairs:", nrow(merged_zscore_df), "\n")
+cat("Result file: OP_neighborhood_enrichment_zscore_merged.csv\n")
